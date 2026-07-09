@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Résultats du Brevet — Ticket à gratter</title>
+<style>
+  :root{ --gold:#e8b94a; --felt:#0d3b2e; --ink:#1b130a; }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;font-family:Georgia,'Times New Roman',serif;
+    background: radial-gradient(ellipse at 50% 30%, #14503e 0%, var(--felt) 55%, #072019 100%);
+  }
+  body::before{
+    content:"";position:fixed;inset:0;pointer-events:none;opacity:.25;
+    background-image:radial-gradient(rgba(255,255,255,.05) 1px, transparent 1px);
+    background-size:5px 5px;
+  }
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;perspective:1000px}
+  #wrap{position:relative;transform-style:preserve-3d;will-change:transform,filter}
+  #gl{display:block;border-radius:14px;cursor:none;touch-action:none}
+  #flakes{position:absolute;inset:0;pointer-events:none;border-radius:14px}
+
+  #coin{
+    position:fixed;width:54px;height:54px;border-radius:50%;pointer-events:none;z-index:30;
+    background:
+      radial-gradient(circle at 34% 30%, #fff7d6 0%, #f0cf6b 22%, #cfa235 55%, #8a6414 85%, #5e440c 100%);
+    box-shadow: inset 0 0 0 4px rgba(255,244,200,.5), inset 0 0 0 7px rgba(120,85,15,.55),
+                0 8px 14px rgba(0,0,0,.45);
+    display:none;align-items:center;justify-content:center;
+    font-size:20px;font-weight:900;color:rgba(94,68,12,.75);
+    transform:translate(-50%,-50%);
+    will-change:transform;
+  }
+  #coin::after{content:"2€"}
+
+  #banner{
+    position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) scale(.6);
+    opacity:0;pointer-events:none;text-align:center;transition:all .5s cubic-bezier(.2,1.6,.4,1);
+    text-shadow:0 4px 24px rgba(0,0,0,.6);white-space:nowrap;z-index:5;
+  }
+  #banner.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  #banner .big{font-size:34px;font-weight:900;letter-spacing:.12em}
+  #banner .big.win{color:#ffe27a}
+  #banner .big.lose{color:#e8e3da}
+  #banner .sub{font-size:16px;color:#fff;opacity:.85;margin-top:6px;letter-spacing:.2em}
+
+  #replay{
+    border:1px solid rgba(232,185,74,.5);background:rgba(0,0,0,.35);color:var(--gold);
+    font-family:inherit;font-size:13px;letter-spacing:.3em;text-transform:uppercase;
+    padding:12px 30px;border-radius:999px;cursor:pointer;transition:all .25s;
+  }
+  #replay:hover{background:var(--gold);color:var(--ink)}
+  #replay:focus-visible{outline:2px solid var(--gold);outline-offset:3px}
+
+  #meter{width:220px;height:3px;background:rgba(255,255,255,.12);border-radius:2px;overflow:hidden}
+  #meter i{display:block;height:100%;width:0%;background:var(--gold);transition:width .2s}
+  .hint{color:#fff;opacity:.4;font-size:11px;letter-spacing:.2em;text-transform:uppercase;text-align:center}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="wrap">
+    <canvas id="gl"></canvas>
+    <canvas id="flakes"></canvas>
+    <div id="banner"></div>
+  </div>
+  <div id="meter"><i></i></div>
+  <div class="hint">gratte les 4 cases avec la pièce</div>
+  <button id="replay">Nouveau ticket</button>
+</div>
+<div id="coin"></div>
+
+<script>
+"use strict";
+const TW = 434, TH = 620;   // ratio de gratte.png (1049×1499)
+const DPR = Math.min(devicePixelRatio || 1, 2);
+const canvas = document.getElementById('gl');
+canvas.width = TW*DPR; canvas.height = TH*DPR;
+canvas.style.width = TW+'px'; canvas.style.height = TH+'px';
+const fl = document.getElementById('flakes');
+fl.width = TW*DPR; fl.height = TH*DPR;
+fl.style.width = TW+'px'; fl.style.height = TH+'px';
+const flx = fl.getContext('2d');
+const coin = document.getElementById('coin');
+const wrap = document.getElementById('wrap');
+
+const gl = canvas.getContext('webgl', {antialias:false});
+if(!gl) alert('WebGL non supporté');
+
+// 4 zones grattables [x, y, w, h] en UV (origine GL en bas à gauche),
+// mesurées sur gratte.png : Français, Histoire-Géo, Sciences, Maths
+const ZONES = [
+  [0.107, 0.496, 0.365, 0.167],
+  [0.530, 0.496, 0.366, 0.167],
+  [0.107, 0.213, 0.365, 0.160],
+  [0.530, 0.213, 0.366, 0.160]
+];
+function inAnyZone(u,v){
+  return ZONES.some(z=>u>z[0]&&u<z[0]+z[2]&&v>z[1]&&v<z[1]+z[3]);
+}
+const zonesFlat = new Float32Array([].concat.apply([],ZONES));
+
+const VERT = `
+attribute vec2 aPos; varying vec2 vUv;
+void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.,1.); }`;
+
+const FRAG_BRUSH = `
+precision mediump float; varying vec2 vUv;
+uniform vec2 uMouse, uPrev; uniform float uRadius, uAspect, uSeed;
+float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7))+uSeed)*43758.5453); }
+float noise(vec2 p){
+  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),
+             mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+}
+void main(){
+  vec2 p=vec2(vUv.x*uAspect,vUv.y), a=vec2(uMouse.x*uAspect,uMouse.y), b=vec2(uPrev.x*uAspect,uPrev.y);
+  vec2 ab=b-a; float t=clamp(dot(p-a,ab)/max(dot(ab,ab),1e-6),0.,1.);
+  float d=distance(p,a+ab*t);
+  float n = noise(p*90.0) * 0.6 + noise(p*260.0) * 0.4;
+  float r = uRadius * (0.55 + 0.75*n);
+  float m = 1.0 - smoothstep(r*0.3, r, d);
+  m *= step(0.12, n) * (0.55 + 0.45*n);
+  gl_FragColor = vec4(vec3(m),1.);
+}`;
+
+const FRAG_COMP = `
+precision highp float; varying vec2 vUv;
+uniform sampler2D uTicket;
+uniform sampler2D uMask;
+uniform vec4  uZones[4];
+uniform vec2  uMaskRes;
+uniform float uTime, uAspect;
+uniform float uReveal[4];
+uniform vec2  uMouse;
+uniform vec3  uLight;
+
+float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+float noise(vec2 p){
+  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),
+             mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+}
+
+// auto-révélation en dissolution : l'or part par plaques, pas en fondu uniforme
+// rev = avancement de révélation de la case courante (0..1)
+float maskAt(vec2 uv, float rev){
+  float m = texture2D(uMask, uv).r;
+  vec2 p = vec2(uv.x*uAspect, uv.y);
+  float n = noise(p*14.0)*0.7 + noise(p*45.0)*0.3;
+  float dissolve = smoothstep(n, n + 0.12, rev * 1.15);
+  return max(m, dissolve);
+}
+
+float heightField(vec2 uv, float rev){
+  float m = maskAt(uv, rev);
+  float latex = 1.0 - smoothstep(0.20, 0.55, m);
+  vec2 p = vec2(uv.x*uAspect, uv.y);
+  float bump = noise(p*140.0)*0.5 + noise(p*420.0)*0.3;
+  return latex * (0.8 + 0.2*bump);
+}
+
+// environnement procédural : plafond de garage avec rampes de néons
+// -> c'est ça qui donne le vrai look métal (le métal reflète le décor)
+vec3 envMap(vec3 R){
+  float up = clamp(R.y*0.5+0.5, 0.0, 1.0);
+  vec3 sky = mix(vec3(0.10,0.16,0.13), vec3(0.55,0.60,0.62), up);
+  float bands = pow(clamp(sin(R.x*9.0 + R.y*2.0)*0.5+0.5, 0.0, 1.0), 6.0);
+  sky += vec3(1.0,0.98,0.9) * bands * smoothstep(0.15, 0.7, up) * 1.6;
+  return sky;
+}
+
+void main(){
+  vec3 ticket = texture2D(uTicket, vUv).rgb;
+
+  // vernis plastifié sur tout le ticket : brillance qui suit la lumière
+  vec3 Lg = normalize(uLight);
+  vec2 pAll = vec2(vUv.x*uAspect, vUv.y);
+  float gloss = exp(-pow(distance(pAll, vec2((uLight.x*0.31+0.5)*uAspect, uLight.y*0.31+0.5))*1.6, 2.0));
+  // vignette d'impression
+  float vig = smoothstep(0.0, 0.12, vUv.x) * smoothstep(1.0, 0.88, vUv.x)
+            * smoothstep(0.0, 0.15, vUv.y) * smoothstep(1.0, 0.85, vUv.y);
+  ticket *= 0.93 + 0.07*vig;
+  ticket += vec3(1.0) * gloss * 0.06;
+
+  bool inZone = false;
+  float rev = 0.0;
+  for(int i=0;i<4;i++){
+    vec4 z = uZones[i];
+    if(vUv.x>z.x && vUv.x<z.x+z.z && vUv.y>z.y && vUv.y<z.y+z.w){ inZone = true; rev = uReveal[i]; }
+  }
+  if(!inZone){ gl_FragColor = vec4(ticket,1.); return; }
+
+  vec2 e = 1.5 / uMaskRes;
+  float h  = heightField(vUv, rev);
+  float hx = heightField(vUv + vec2(e.x, 0.0), rev) - heightField(vUv - vec2(e.x, 0.0), rev);
+  float hy = heightField(vUv + vec2(0.0, e.y), rev) - heightField(vUv - vec2(0.0, e.y), rev);
+  vec3 N = normalize(vec3(-hx*3.5, -hy*3.5, 1.0));
+
+  vec3 L = Lg;
+  vec3 V = vec3(0.0, 0.0, 1.0);
+  vec3 Hh = normalize(L + V);
+  float diff = clamp(dot(N, L), 0.0, 1.0);
+  float spec = pow(clamp(dot(N, Hh), 0.0, 1.0), 42.0);
+
+  vec2 p = pAll;
+  float brush = noise(vec2(p.x*3.0 + p.y*140.0, p.y*3.0))*0.5 + noise(p*vec2(220.0, 8.0))*0.5;
+  vec3 deep = vec3(0.42, 0.26, 0.05);
+  vec3 base = vec3(0.82, 0.60, 0.17);
+  vec3 hi   = vec3(1.00, 0.94, 0.65);
+  vec3 gold = mix(deep, base, brush);
+
+  // réflexion d'environnement teintée or : le vrai secret du métal crédible
+  vec3 R = reflect(-V, N);
+  R.xy += uLight.xy * 0.6;             // le reflet glisse quand la lumière bouge
+  vec3 env = envMap(normalize(R));
+  gold = gold * (0.35 + 0.55*diff) + env * vec3(1.0, 0.82, 0.45) * 0.55 + hi * spec * 1.2;
+
+  float g = hash(floor(p*95.0));
+  float align = pow(clamp(dot(N, Hh), 0.0, 1.0), 8.0);
+  float glint = step(0.955, g) * align * (0.6 + 0.4*sin(uTime*4.0 + g*40.0));
+  gold += vec3(1.0, 0.95, 0.75) * glint * 1.5;
+
+  float m = maskAt(vUv, rev);
+  float cover = smoothstep(0.20, 0.55, m);
+  float hL = heightField(vUv + vec2(L.x, L.y) * e * 2.5, rev);
+  float shadow = clamp((hL - h) * 1.8, 0.0, 1.0) * cover;
+  vec3 paper = ticket * (1.0 - shadow*0.35);
+  float crumb = step(0.986, hash(floor(p*300.0))) * cover * (1.0 - smoothstep(0.55, 0.95, m));
+  paper = mix(paper, deep*1.4, crumb*0.8);
+
+  vec3 col = mix(gold, paper, cover);
+
+  float rim = smoothstep(0.10,0.28,m)*(1.0-smoothstep(0.28,0.60,m));
+  col = mix(col, vec3(0.25,0.15,0.03), rim*0.4);
+  col += hi * rim * spec * 2.0;
+
+  gl_FragColor = vec4(col,1.);
+}`;
+
+function compile(t,s){const sh=gl.createShader(t);gl.shaderSource(sh,s);gl.compileShader(sh);
+  if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw gl.getShaderInfoLog(sh);return sh;}
+function program(fs){const p=gl.createProgram();
+  gl.attachShader(p,compile(gl.VERTEX_SHADER,VERT));gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs));
+  gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw gl.getProgramInfoLog(p);return p;}
+const progBrush=program(FRAG_BRUSH), progComp=program(FRAG_COMP);
+const buf=gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+function bindQuad(p){const l=gl.getAttribLocation(p,'aPos');
+  gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.enableVertexAttribArray(l);
+  gl.vertexAttribPointer(l,2,gl.FLOAT,false,0,0);}
+const U=(p,n)=>gl.getUniformLocation(p,n);
+
+const ticketImg = new Image();
+ticketImg.src = 'gratte.png';
+
+// notes.json : { "francais": 10, "histoire": 12, "sciences": 14, "maths": 16 }
+// -> dessinées sous la couche d'or, dans l'ordre des ZONES
+const SUBJECTS = [
+  { key:'francais', color:'#1e7d36' },
+  { key:'histoire', color:'#1f5fae' },
+  { key:'sciences', color:'#5b3fa8' },
+  { key:'maths',    color:'#e07818' }
+];
+
+function composeTicket(img, notes){
+  const W=img.naturalWidth, H=img.naturalHeight;
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const x=c.getContext('2d');
+  x.drawImage(img,0,0);
+  ZONES.forEach((z,i)=>{
+    const note = notes[SUBJECTS[i].key];
+    if(note==null) return;
+    const zx=z[0]*W, zw=z[2]*W, zh=z[3]*H, zy=H-(z[1]+z[3])*H;
+    // panneau papier gris qui recouvre la mention imprimée
+    x.save();
+    x.beginPath();
+    if(x.roundRect) x.roundRect(zx+4,zy+4,zw-8,zh-8,16); else x.rect(zx+4,zy+4,zw-8,zh-8);
+    x.clip();
+    const g=x.createLinearGradient(0,zy,0,zy+zh);
+    g.addColorStop(0,'#e8e7e3'); g.addColorStop(1,'#c9c8c4');
+    x.fillStyle=g; x.fillRect(zx,zy,zw,zh);
+    x.globalAlpha=0.08;
+    for(let k=0;k<60;k++){
+      x.fillStyle=Math.random()<.5?'#8a8a86':'#ffffff';
+      x.fillRect(zx+Math.random()*zw, zy+Math.random()*zh, Math.random()*40+6, 2);
+    }
+    x.globalAlpha=1;
+    // la note "XX/20" centrée
+    const cx=zx+zw/2, baseY=zy+zh*0.52+30;
+    const numStr=String(note);
+    x.font='900 120px Georgia';
+    const numW=x.measureText(numStr).width;
+    x.font='700 52px Georgia';
+    const sufW=x.measureText('/20').width;
+    const startX=cx-(numW+10+sufW)/2;
+    x.textAlign='left'; x.textBaseline='alphabetic';
+    x.fillStyle=SUBJECTS[i].color;
+    x.font='900 120px Georgia';
+    x.fillText(numStr,startX,baseY);
+    x.font='700 52px Georgia';
+    x.fillText('/20',startX+numW+10,baseY);
+    x.textAlign='center';
+    x.font='700 30px Georgia';
+    x.fillStyle='rgba(60,60,58,.75)';
+    x.fillText('TA NOTE', cx, zy+52);
+    x.restore();
+  });
+  return c;
+}
+
+let texTicket=null;
+function setTicketTexture(src){
+  if(texTicket) gl.deleteTexture(texTicket);
+  texTicket=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,texTicket);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,src);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+}
+
+const MW=384, MH=Math.round(384*TH/TW);
+const maskTex=gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D,maskTex);
+gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,MW,MH,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+const maskFBO=gl.createFramebuffer();
+gl.bindFramebuffer(gl.FRAMEBUFFER,maskFBO);
+gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,maskTex,0);
+gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+function clearMask(){
+  gl.bindFramebuffer(gl.FRAMEBUFFER,maskFBO);
+  gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+}
+
+// ================= audio =================
+let ac=null, scratchGain=null, scratchFilter=null;
+function initAudio(){
+  if(ac) return;
+  try{
+    ac = new (window.AudioContext||window.webkitAudioContext)();
+    const len = ac.sampleRate * 1;
+    const buffer = ac.createBuffer(1, len, ac.sampleRate);
+    const d = buffer.getChannelData(0);
+    for(let i=0;i<len;i++) d[i] = Math.random()*2-1;
+    const src = ac.createBufferSource();
+    src.buffer = buffer; src.loop = true;
+    scratchFilter = ac.createBiquadFilter();
+    scratchFilter.type = 'bandpass'; scratchFilter.frequency.value = 2400; scratchFilter.Q.value = 0.9;
+    scratchGain = ac.createGain(); scratchGain.gain.value = 0;
+    src.connect(scratchFilter); scratchFilter.connect(scratchGain); scratchGain.connect(ac.destination);
+    src.start();
+  }catch(e){}
+}
+function setScratchVolume(speed){
+  if(!scratchGain || !ac) return;
+  const v = Math.min(speed*0.02, 0.22);
+  scratchGain.gain.setTargetAtTime(v, ac.currentTime, 0.03);
+  scratchFilter.frequency.setTargetAtTime(1800 + Math.min(speed*40, 2600), ac.currentTime, 0.05);
+}
+// petit "ding" quand une case vient de se révéler
+function playDing(){
+  if(!ac) return;
+  const t=ac.currentTime;
+  const o=ac.createOscillator(), g=ac.createGain();
+  o.type='triangle'; o.frequency.value=880;
+  g.gain.setValueAtTime(0,t);
+  g.gain.linearRampToValueAtTime(0.14,t+0.015);
+  g.gain.exponentialRampToValueAtTime(0.001,t+0.35);
+  o.connect(g); g.connect(ac.destination);
+  o.start(t); o.stop(t+0.4);
+}
+// jingle de victoire (arpège) ou note grave de défaite
+function playResult(win){
+  if(!ac) return;
+  const t = ac.currentTime;
+  const notes = win ? [523.25, 659.25, 783.99, 1046.5] : [220, 174.6];
+  notes.forEach((f,i)=>{
+    const o = ac.createOscillator(); const g = ac.createGain();
+    o.type = win ? 'triangle' : 'sine';
+    o.frequency.value = f;
+    g.gain.setValueAtTime(0, t + i*0.12);
+    g.gain.linearRampToValueAtTime(0.18, t + i*0.12 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.001, t + i*0.12 + (win?0.5:0.7));
+    o.connect(g); g.connect(ac.destination);
+    o.start(t + i*0.12); o.stop(t + i*0.12 + 0.8);
+  });
+}
+
+// ================= état =================
+const mouse={x:.5,y:.5,px:.5,py:.5,down:false,speed:0};
+// une case se révèle dès qu'elle est grattée à ZONE_THRESHOLD ; la bannière attend les 4
+const ZONE_THRESHOLD = 0.55;
+const reveal      = new Float32Array(4);
+const revealTarget= new Float32Array(4);
+const zoneDone    = [false,false,false,false];
+let done=false, frameCount=0, seed=Math.random()*100;
+const light={x:0.3,y:0.5,gyro:false};
+const tilt={x:0,y:0,tx:0,ty:0};
+const banner=document.getElementById('banner');
+const meterBar=document.querySelector('#meter i');
+const particles=[];
+const MAX_PARTICLES=700;
+let lastVibe=0;
+
+function toUV(e){
+  const r=canvas.getBoundingClientRect();
+  return [(e.clientX-r.left)/r.width, 1-(e.clientY-r.top)/r.height];
+}
+const pileY = TH*DPR - 8*DPR;
+
+canvas.addEventListener('pointerdown',e=>{
+  initAudio(); if(ac && ac.state==='suspended') ac.resume();
+  canvas.setPointerCapture(e.pointerId);
+  const uv=toUV(e); mouse.x=mouse.px=uv[0]; mouse.y=mouse.py=uv[1]; mouse.down=true;
+});
+canvas.addEventListener('pointermove',e=>{
+  const uv=toUV(e); const u=uv[0], v=uv[1];
+  if(mouse.down && !done){
+    const dx=(u-mouse.x)*TW, dy=(v-mouse.y)*TH;
+    mouse.speed = Math.hypot(dx,dy);
+    const inZ = inAnyZone(u,v);
+    if(inZ){
+      for(let i=0;i<Math.min(mouse.speed*0.7,9);i++){
+        if(particles.length>MAX_PARTICLES) particles.shift();
+        particles.push({
+          x:u*TW*DPR + (Math.random()-.5)*20*DPR,
+          y:(1-v)*TH*DPR,
+          vx:(Math.random()-.5)*3*DPR + dx*0.06*DPR,
+          vy:(Math.random()*-1.5-0.5)*DPR,
+          rot:Math.random()*Math.PI, vr:(Math.random()-.5)*0.4,
+          settled:false, life:1,
+          w:(Math.random()*4+2)*DPR, hgt:(Math.random()*1.5+1)*DPR,
+          shade: Math.random()
+        });
+      }
+      // vibration haptique (mobile) pendant le grattage
+      const now = performance.now();
+      if(navigator.vibrate && mouse.speed>2 && now-lastVibe>90){
+        navigator.vibrate(8); lastVibe=now;
+      }
+    }
+  } else { mouse.speed*=0.8; }
+  const tiltCX = Math.max(Math.min((v-mouse.y)*400,25),-25);
+  const tiltCY = Math.max(Math.min((u-mouse.x)*400,25),-25);
+  mouse.x=u; mouse.y=v;
+  if(!light.gyro){ light.x=(u-0.5)*1.6; light.y=(v-0.5)*1.6; }
+  // cible de tilt 3D du ticket (réduit pendant le grattage pour la stabilité)
+  const k = mouse.down ? 2.2 : 7.0;
+  tilt.tx = -(v-0.5)*k; tilt.ty = (u-0.5)*k;
+  coin.style.display='flex';
+  const press = mouse.down ? 0.86 : 1;
+  coin.style.transform='translate('+e.clientX+'px,'+e.clientY+'px) translate(-50%,-50%) scale('+press+') rotateX('+tiltCX+'deg) rotateY('+tiltCY+'deg)';
+});
+canvas.addEventListener('pointerleave',()=>{ coin.style.display='none'; tilt.tx=0; tilt.ty=0; });
+const stopScratch=()=>{ mouse.down=false; mouse.speed=0; setScratchVolume(0); };
+canvas.addEventListener('pointerup',stopScratch);
+canvas.addEventListener('pointercancel',stopScratch);
+
+window.addEventListener('deviceorientation',e=>{
+  if(e.gamma===null) return;
+  light.gyro=true;
+  light.x = Math.max(Math.min(e.gamma/30,1.5),-1.5);
+  light.y = Math.max(Math.min((e.beta-40)/30,1.5),-1.5) * -1;
+  tilt.tx = Math.max(Math.min((e.beta-40)/8,8),-8);
+  tilt.ty = Math.max(Math.min(e.gamma/8,8),-8);
+});
+
+document.getElementById('replay').addEventListener('click',()=>{
+  clearMask();
+  reveal.fill(0); revealTarget.fill(0);
+  for(let i=0;i<4;i++) zoneDone[i]=false;
+  done=false;
+  seed=Math.random()*100;
+  particles.length=0;
+  banner.classList.remove('show');
+  meterBar.style.width='0%';
+});
+
+const zonesPx = ZONES.map(z=>({ x:Math.floor(z[0]*MW), y:Math.floor(z[1]*MH),
+                                w:Math.floor(z[2]*MW), h:Math.floor(z[3]*MH) }));
+const pixBuf=new Uint8Array(Math.max(...zonesPx.map(z=>z.w*z.h))*4);
+// pourcentage gratté de chaque case, indépendamment
+function scratchedPctPerZone(){
+  gl.bindFramebuffer(gl.FRAMEBUFFER,maskFBO);
+  const out=zonesPx.map(z=>{
+    gl.readPixels(z.x,z.y,z.w,z.h,gl.RGBA,gl.UNSIGNED_BYTE,pixBuf);
+    const len=z.w*z.h*4;
+    let n=0;
+    for(let i=0;i<len;i+=4) if(pixBuf[i]>110) n++;
+    return n/(z.w*z.h);
+  });
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  return out;
+}
+
+function drawParticles(dt){
+  flx.clearRect(0,0,fl.width,fl.height);
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];
+    if(!p.settled){
+      p.x+=p.vx; p.y+=p.vy; p.vy+=0.22*DPR; p.rot+=p.vr;
+      if(!p.confetti && p.y>=pileY - Math.random()*6*DPR && p.vy>0){
+        p.settled=true; p.vx=0; p.vy=0; p.vr=0;
+        p.y = pileY - Math.random()*5*DPR;
+      }
+      if(p.confetti){ p.life-=dt*0.9; if(p.life<=0){particles.splice(i,1);continue;} }
+      if(p.y>fl.height+20){ particles.splice(i,1); continue; }
+    }
+    flx.save();
+    flx.translate(p.x,p.y); flx.rotate(p.rot);
+    if(p.confetti){
+      flx.globalAlpha=Math.max(p.life,0);
+      flx.fillStyle='hsl('+p.hue+',85%,60%)';
+      flx.fillRect(-p.w/2,-p.hgt/2,p.w,p.hgt*2.5);
+    } else {
+      const sh=p.shade;
+      flx.fillStyle='rgb('+Math.round(140+sh*90)+','+Math.round(95+sh*65)+','+Math.round(20+sh*35)+')';
+      flx.fillRect(-p.w/2,-p.hgt/2,p.w,p.hgt);
+      flx.fillStyle='rgba(60,40,8,.6)';
+      flx.fillRect(-p.w/2,0,p.w,p.hgt*0.5);
+    }
+    flx.restore();
+  }
+  flx.globalAlpha=1;
+}
+function burstConfetti(){
+  for(let i=0;i<160;i++){
+    if(particles.length>MAX_PARTICLES) particles.shift();
+    particles.push({
+      x:fl.width/2, y:fl.height*0.4,
+      vx:(Math.random()-.5)*14*DPR, vy:(Math.random()*-9-2)*DPR,
+      rot:Math.random()*Math.PI, vr:(Math.random()-.5)*0.5,
+      settled:false, confetti:true, life:1.6+Math.random(),
+      w:(Math.random()*4+2)*DPR, hgt:(Math.random()*3+2)*DPR,
+      hue: Math.random()<.6 ? 45+Math.random()*10 : Math.random()*360
+    });
+  }
+}
+// une case atteint le seuil : elle se révèle seule, petit ding, pas de bannière
+function revealZone(i){
+  zoneDone[i]=true;
+  revealTarget[i]=1;
+  playDing();
+  if(navigator.vibrate) navigator.vibrate(30);
+  if(zoneDone.every(Boolean)) finish();
+}
+
+function finish(){
+  done=true; setScratchVolume(0);
+  banner.innerHTML = '<div class="big win">FÉLICITATIONS !</div><div class="sub">tu peux être fier(e) de toi !</div>';
+  setTimeout(function(){
+    banner.classList.add('show');
+    playResult(true);
+    burstConfetti(); if(navigator.vibrate) navigator.vibrate([60,40,60,40,120]);
+  }, 500);
+}
+
+let last=performance.now(), t0=last;
+Promise.all([
+  new Promise((res,rej)=>{ ticketImg.onload=()=>res(ticketImg); ticketImg.onerror=rej; }),
+  fetch('notes.json').then(r=>r.ok?r.json():null).catch(()=>null)
+]).then(([img,notes])=>{
+  try{ setTicketTexture(notes?composeTicket(img,notes):img); }
+  catch(e){ alert('Image bloquée par le navigateur : lance un serveur local (ex. npx serve) au lieu d\'ouvrir le fichier directement.'); return; }
+  clearMask();
+  // ?reveal => tout révéler ; ?reveal=0,2 => seulement ces cases (calage des ZONES)
+  const rv=new URLSearchParams(location.search).get('reveal');
+  if(rv!==null){
+    const idx = rv==='' ? [0,1,2,3] : rv.split(',').map(Number);
+    idx.forEach(i=>{ reveal[i]=1; revealTarget[i]=1; zoneDone[i]=true; });
+    done = zoneDone.every(Boolean);
+  }
+  last=performance.now(); t0=last;
+  requestAnimationFrame(frame);
+}).catch(()=>{ alert('gratte.png introuvable à côté de index.html'); });
+
+function frame(now){
+  const dt=Math.min((now-last)/1000,0.05); last=now;
+  const time=(now-t0)/1000;
+  frameCount++;
+
+  // tilt 3D du ticket avec ombre qui suit
+  tilt.x += (tilt.tx - tilt.x)*dt*8;
+  tilt.y += (tilt.ty - tilt.y)*dt*8;
+  wrap.style.transform='rotateX('+tilt.x+'deg) rotateY('+tilt.y+'deg)';
+  wrap.style.filter='drop-shadow('+(-tilt.y*2.5)+'px '+(24+tilt.x*2.5)+'px 40px rgba(0,0,0,.55))';
+
+  if(mouse.down && !done){
+    gl.bindFramebuffer(gl.FRAMEBUFFER,maskFBO);
+    gl.viewport(0,0,MW,MH);
+    gl.useProgram(progBrush); bindQuad(progBrush);
+    gl.uniform2f(U(progBrush,'uMouse'),mouse.x,mouse.y);
+    gl.uniform2f(U(progBrush,'uPrev'),mouse.px,mouse.py);
+    gl.uniform1f(U(progBrush,'uRadius'),0.07);
+    gl.uniform1f(U(progBrush,'uAspect'),TW/TH);
+    gl.uniform1f(U(progBrush,'uSeed'),seed);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE);
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    gl.disable(gl.BLEND);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+
+    setScratchVolume(mouse.speed);
+    if(frameCount%12===0){
+      const pcts=scratchedPctPerZone();
+      let progress=0;
+      for(let i=0;i<4;i++){
+        const p=Math.min(pcts[i]/ZONE_THRESHOLD,1);
+        progress += (zoneDone[i]?1:p)/4;
+        if(!zoneDone[i] && pcts[i]>ZONE_THRESHOLD) revealZone(i);
+      }
+      meterBar.style.width=progress*100+'%';
+    }
+  }
+  mouse.px=mouse.x; mouse.py=mouse.y;
+  for(let i=0;i<4;i++) reveal[i] += (revealTarget[i]-reveal[i])*dt*2.6;
+
+  gl.viewport(0,0,canvas.width,canvas.height);
+  gl.useProgram(progComp); bindQuad(progComp);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,texTicket);
+  gl.uniform1i(U(progComp,'uTicket'),0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,maskTex);
+  gl.uniform1i(U(progComp,'uMask'),1);
+  gl.uniform4fv(U(progComp,'uZones[0]'),zonesFlat);
+  gl.uniform2f(U(progComp,'uMaskRes'),MW,MH);
+  gl.uniform1f(U(progComp,'uTime'),time);
+  gl.uniform1f(U(progComp,'uAspect'),TW/TH);
+  gl.uniform1fv(U(progComp,'uReveal[0]'),reveal);
+  gl.uniform2f(U(progComp,'uMouse'),mouse.x,mouse.y);
+  gl.uniform3f(U(progComp,'uLight'),light.x,light.y,1.0);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  drawParticles(dt);
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>
