@@ -78,10 +78,10 @@
     <div id="banner"></div>
   </div>
   <div id="meter"><i></i></div>
-  <div class="hint">gratte les 4 cases avec la pièce</div>
+  <div class="hint">gratte les 4 cases</div>
   <button id="replay">Nouveau ticket</button>
 </div>
-<div id="version">v1.2.0</div>
+<div id="version">v1.3.0</div>
 <div id="debug"></div>
 <div id="coin"></div>
 
@@ -108,6 +108,7 @@ function layout(){
 layout();
 addEventListener('resize', layout);
 if(TOUCH) document.getElementById('wrap').style.filter='drop-shadow(0 18px 26px rgba(0,0,0,.5))';
+document.querySelector('.hint').textContent='gratte les 4 cases avec '+(TOUCH?'le doigt':'la pièce');
 const coin = document.getElementById('coin');
 const wrap = document.getElementById('wrap');
 
@@ -451,7 +452,8 @@ function playResult(win){
 // ================= état =================
 const mouse={x:.5,y:.5,px:.5,py:.5,down:false,speed:0};
 // une case se révèle dès qu'elle est grattée à ZONE_THRESHOLD ; la bannière attend les 4
-const ZONE_THRESHOLD = TOUCH ? 0.42 : 0.5;
+// plafond ~0.85 : le pinceau est troué par step(0.12,n), ces pixels-là ne blanchissent jamais
+const ZONE_THRESHOLD = TOUCH ? 0.62 : 0.65;
 const MEASURE_EVERY  = TOUCH ? 20 : 12;
 const reveal      = new Float32Array(4);
 const revealTarget= new Float32Array(4);
@@ -515,9 +517,12 @@ canvas.addEventListener('pointermove',e=>{
   // cible de tilt 3D du ticket (réduit pendant le grattage pour la stabilité)
   const k = mouse.down ? 2.2 : 7.0;
   tilt.tx = -(v-0.5)*k; tilt.ty = (u-0.5)*k;
-  coin.style.display='flex';
-  const press = mouse.down ? 0.86 : 1;
-  coin.style.transform='translate('+e.clientX+'px,'+e.clientY+'px) translate(-50%,-50%) scale('+press+') rotateX('+tiltCX+'deg) rotateY('+tiltCY+'deg)';
+  // au doigt, la pièce est de toute façon masquée par la main : on l'économise
+  if(!TOUCH){
+    coin.style.display='flex';
+    const press = mouse.down ? 0.86 : 1;
+    coin.style.transform='translate('+e.clientX+'px,'+e.clientY+'px) translate(-50%,-50%) scale('+press+') rotateX('+tiltCX+'deg) rotateY('+tiltCY+'deg)';
+  }
 });
 canvas.addEventListener('pointerleave',()=>{ coin.style.display='none'; tilt.tx=0; tilt.ty=0; });
 const stopScratch=()=>{ mouse.down=false; mouse.speed=0; setScratchVolume(0); };
@@ -688,7 +693,8 @@ function frame(now){
     gl.useProgram(progBrush); bindQuad(progBrush);
     gl.uniform2f(U(progBrush,'uMouse'),mouse.x,mouse.y);
     gl.uniform2f(U(progBrush,'uPrev'),mouse.px,mouse.py);
-    gl.uniform1f(U(progBrush,'uRadius'),TOUCH?0.105:0.07);
+    // surface couverte ~ rayon² : le baisser allonge fortement le grattage
+    gl.uniform1f(U(progBrush,'uRadius'),TOUCH?0.075:0.055);
     gl.uniform1f(U(progBrush,'uAspect'),TW/TH);
     gl.uniform1f(U(progBrush,'uSeed'),seed);
     gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE);
