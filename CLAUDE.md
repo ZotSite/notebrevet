@@ -32,7 +32,7 @@ Le rendu repose sur deux passes WebGL partageant un quad plein écran :
 Autour de ça :
 
 - **Texture du ticket** : `composeTicket()` dessine `gratte.png` en canvas 2D puis peint dans chaque case un panneau papier portant la note lue dans `notes.json` (ce panneau recouvre la mention imprimée sur l'image). Le résultat est uploadé via `setTicketTexture`. L'upload et le démarrage de la boucle rAF attendent le `Promise.all` image + fetch JSON.
-- **Révélation par case** : `scratchedPctPerZone()` fait un `readPixels` par zone toutes les 12 frames. Dès qu'une case dépasse `ZONE_THRESHOLD` (55 %), `revealZone(i)` la dissout seule — chaque zone a son propre avancement dans `reveal[4]` (uniforme `uReveal[4]`, indexé par la zone trouvée dans le fragment shader). `finish()` (bannière + confettis) n'est appelé qu'une fois les 4 cases révélées.
+- **Révélation par case** : `measureZones()` fait un `readPixels` par zone non terminée. Dès qu'une case dépasse `ZONE_THRESHOLD` (0.62 au doigt, 0.65 à la souris — **plafond ~0.85**, car `step(0.12,n)` dans `FRAG_BRUSH` laisse des pixels que le pinceau n'atteint jamais), `revealZone(i)` la dissout seule — chaque zone a son propre avancement dans `reveal[4]` (uniforme `uReveal[4]`, indexé par la zone trouvée dans le fragment shader). `finish()` (bannière + confettis) n'est appelé qu'une fois les 4 cases révélées.
 - **Particules** (copeaux + confettis) : second canvas 2D superposé (`#flakes`), tableau `particles` partagé, distingué par le flag `confetti`.
 - **Audio** : Web Audio procédural (bruit blanc filtré pour le grattage, arpège d'oscillateurs pour le résultat). Initialisé au premier `pointerdown` (contrainte autoplay).
 - **Interactions** : la pièce (`#coin`) est un div qui suit le pointeur ; tilt 3D du ticket via CSS transform sur `#wrap` ; la lumière du shader suit la souris ou le gyroscope (`deviceorientation`) ; vibration haptique sur mobile.
@@ -46,6 +46,11 @@ Le drapeau `TOUCH` (`pointer:coarse`) pilote plusieurs compromis, tous là pour 
 - **`DPR` capé à 1.5** et **`MAX_PARTICLES` réduit** : le shader d'or est fill-rate bound, et les copeaux sont redessinés en canvas 2D à chaque frame.
 - **`MEASURE_EVERY` à 20 frames**, et `measureZones()` ignore les cases déjà révélées + n'échantillonne qu'une ligne sur deux : `readPixels` est un stall GPU→CPU, brutal sur les GPU tuilés.
 - **`drop-shadow` figé** : animé, il repeint tout le ticket (flou 40px) à chaque frame.
-- **`uRadius` plus grand** et `ZONE_THRESHOLD` plus bas : un doigt couvre plus qu'une souris mais bouge moins précisément.
+- **`uRadius` plus grand** et `ZONE_THRESHOLD` plus bas : un doigt couvre plus qu'une souris mais bouge moins précisément. La surface couverte varie comme le carré du rayon — baisser `uRadius` allonge fortement le grattage.
+- **La pièce `#coin` n'est pas affichée** : masquée par la main, elle coûtait une transform CSS par `pointermove`.
+
+`FRAG_BRUSH` et `FRAG_COMP` doivent tourner en **`highp`** (préfixe `PRECISION`) : en `mediump`, réellement fp16 sur mobile, le hash `fract(sin(dot(p,…))*43758.5453)` s'effondre, le bruit devient constant et le pinceau n'écrit plus rien. Le desktop promeut `mediump` silencieusement et masque le bug.
+
+Le masque est une texture **puissance de deux** (512×512) avec `checkFramebufferStatus()` : une texture NPOT en cible de rendu passe sur desktop et casse sur mobile, et WebGL dégrade sans lever d'erreur. Si la cible manque, `measureZones()` doit refuser de tourner — sinon `readPixels` lit le canvas (l'or, très clair) et conclut « 100 % gratté ».
 
 `layout()` met le ticket à l'échelle du viewport (le backing store reste `TW*DPR`). `toUV()` doit lire la boîte de **layout** (`stage` rect + `offsetLeft/Top`) et non `canvas.getBoundingClientRect()`, faussé par le tilt 3D de `#wrap` : sinon le grattage se décale sous le doigt.
