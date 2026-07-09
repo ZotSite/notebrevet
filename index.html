@@ -55,6 +55,12 @@
   #meter{width:220px;height:3px;background:rgba(255,255,255,.12);border-radius:2px;overflow:hidden}
   #meter i{display:block;height:100%;width:0%;background:var(--gold);transition:width .2s}
   .hint{color:#fff;opacity:.4;font-size:11px;letter-spacing:.2em;text-transform:uppercase;text-align:center}
+
+  #version{
+    position:fixed;top:12px;right:16px;z-index:40;
+    color:var(--gold);opacity:.5;font-size:11px;letter-spacing:.18em;
+    user-select:none;pointer-events:none;
+  }
 </style>
 </head>
 <body>
@@ -68,6 +74,7 @@
   <div class="hint">gratte les 4 cases avec la pièce</div>
   <button id="replay">Nouveau ticket</button>
 </div>
+<div id="version">v1.1.0</div>
 <div id="coin"></div>
 
 <script>
