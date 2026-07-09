@@ -61,6 +61,13 @@
     color:var(--gold);opacity:.5;font-size:11px;letter-spacing:.18em;
     user-select:none;pointer-events:none;
   }
+
+  #debug{
+    display:none;position:fixed;left:8px;top:8px;z-index:40;
+    font-family:monospace;font-size:11px;line-height:1.5;color:#9fe6b0;
+    background:rgba(0,0,0,.55);padding:8px 10px;border-radius:6px;
+    white-space:pre;pointer-events:none;
+  }
 </style>
 </head>
 <body>
@@ -74,7 +81,8 @@
   <div class="hint">gratte les 4 cases avec la pièce</div>
   <button id="replay">Nouveau ticket</button>
 </div>
-<div id="version">v1.1.0</div>
+<div id="version">v1.2.0</div>
+<div id="debug"></div>
 <div id="coin"></div>
 
 <script>
@@ -123,8 +131,17 @@ const VERT = `
 attribute vec2 aPos; varying vec2 vUv;
 void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.,1.); }`;
 
-const FRAG_BRUSH = `
-precision mediump float; varying vec2 vUv;
+// highp obligatoire : le hash noise (fract(sin(...)*43758.5)) s'effondre en fp16,
+// le bruit devient constant et le pinceau n'écrit plus rien sur GPU mobile.
+const PRECISION = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif`;
+
+const FRAG_BRUSH = PRECISION + `
+varying vec2 vUv;
 uniform vec2 uMouse, uPrev; uniform float uRadius, uAspect, uSeed;
 float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7))+uSeed)*43758.5453); }
 float noise(vec2 p){
@@ -143,8 +160,8 @@ void main(){
   gl_FragColor = vec4(vec3(m),1.);
 }`;
 
-const FRAG_COMP = `
-precision highp float; varying vec2 vUv;
+const FRAG_COMP = PRECISION + `
+varying vec2 vUv;
 uniform sampler2D uTicket;
 uniform sampler2D uMask;
 uniform vec4  uZones[4];
@@ -342,19 +359,36 @@ function setTicketTexture(src){
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
 }
 
-const MW=384, MH=Math.round(384*TH/TW);
-const maskTex=gl.createTexture();
-gl.bindTexture(gl.TEXTURE_2D,maskTex);
-gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,MW,MH,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
-gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
-gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
-gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
-gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-const maskFBO=gl.createFramebuffer();
-gl.bindFramebuffer(gl.FRAMEBUFFER,maskFBO);
-gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,maskTex,0);
-gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+// Le masque est échantillonné en UV : sa résolution n'a pas à suivre le ratio du
+// ticket. On la prend en puissance de deux — une texture NPOT en cible de rendu
+// est acceptée par les pilotes desktop mais reste fragile sur GPU mobile.
+// Le framebuffer est vérifié : incomplet, WebGL ne lève rien et dégrade en silence.
+function makeMaskTarget(w,h){
+  const tex=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  const fbo=gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  const status=gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  if(status!==gl.FRAMEBUFFER_COMPLETE){ gl.deleteFramebuffer(fbo); gl.deleteTexture(tex); return null; }
+  return {tex,fbo,w,h};
+}
+let mask=null;
+for(const [w,h] of [[512,512],[256,256],[384,Math.round(384*TH/TW)]]){
+  mask=makeMaskTarget(w,h);
+  if(mask) break;
+}
+if(!mask) alert("Ce navigateur ne sait pas dessiner le masque de grattage (framebuffer incomplet).");
+const MW=mask?mask.w:512, MH=mask?mask.h:512;
+const maskTex=mask&&mask.tex, maskFBO=mask&&mask.fbo;
 function clearMask(){
+  if(!mask) return;
   gl.bindFramebuffer(gl.FRAMEBUFFER,maskFBO);
   gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
   gl.bindFramebuffer(gl.FRAMEBUFFER,null);
@@ -514,9 +548,31 @@ const zonesPx = ZONES.map(z=>({ x:Math.floor(z[0]*MW), y:Math.floor(z[1]*MH),
                                 w:Math.floor(z[2]*MW), h:Math.floor(z[3]*MH) }));
 const pixBuf=new Uint8Array(Math.max(...zonesPx.map(z=>z.w*z.h))*4);
 const zonePct=[0,0,0,0];
+
+// ?debug : lire l'état réel du GPU depuis un téléphone, sans câble ni console
+const dbgEl=document.getElementById('debug');
+const DEBUG=new URLSearchParams(location.search).has('debug');
+if(DEBUG){
+  dbgEl.style.display='block';
+  const hp=gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER,gl.HIGH_FLOAT);
+  dbgEl.dataset.head=
+    'mask '+(mask?MW+'x'+MH+' OK':'ABSENT')+'\n'+
+    'touch '+TOUCH+'  dpr '+DPR+'\n'+
+    'highp frag '+(hp&&hp.precision>0?'oui('+hp.precision+')':'NON')+'\n'+
+    'maxTex '+gl.getParameter(gl.MAX_TEXTURE_SIZE)+
+    '  fragVec '+gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
+}
+function dbgUpdate(){
+  if(!DEBUG) return;
+  dbgEl.textContent = dbgEl.dataset.head+'\n'+
+    'zones '+zonePct.map(p=>Math.round(p*100)+'%').join(' ')+'\n'+
+    'done  '+zoneDone.map(d=>d?'1':'0').join(' ')+
+    '   glErr '+gl.getError();
+}
 // readPixels est un stall GPU->CPU (très cher sur mobile) : on ne mesure
 // que les cases encore en cours, et on échantillonne une ligne sur deux
 function measureZones(){
+  if(!mask) return;   // sans cible de rendu, readPixels lirait le canvas (l'or) => 100% gratté
   gl.bindFramebuffer(gl.FRAMEBUFFER,maskFBO);
   for(let i=0;i<4;i++){
     if(zoneDone[i]) continue;
@@ -602,6 +658,7 @@ Promise.all([
   try{ setTicketTexture(notes?composeTicket(img,notes):img); }
   catch(e){ alert('Image bloquée par le navigateur : lance un serveur local (ex. npx serve) au lieu d\'ouvrir le fichier directement.'); return; }
   clearMask();
+  dbgUpdate();
   // ?reveal => tout révéler ; ?reveal=0,2 => seulement ces cases (calage des ZONES)
   const rv=new URLSearchParams(location.search).get('reveal');
   if(rv!==null){
@@ -625,7 +682,7 @@ function frame(now){
   // le drop-shadow (flou 40px) repeint tout le ticket : animé sur desktop, figé au doigt
   if(!TOUCH) wrap.style.filter='drop-shadow('+(-tilt.y*2.5)+'px '+(24+tilt.x*2.5)+'px 40px rgba(0,0,0,.55))';
 
-  if(mouse.down && !done){
+  if(mouse.down && !done && mask){
     gl.bindFramebuffer(gl.FRAMEBUFFER,maskFBO);
     gl.viewport(0,0,MW,MH);
     gl.useProgram(progBrush); bindQuad(progBrush);
@@ -648,6 +705,7 @@ function frame(now){
         if(!zoneDone[i] && zonePct[i]>ZONE_THRESHOLD) revealZone(i);
       }
       meterBar.style.width=progress*100+'%';
+      dbgUpdate();
     }
   }
   mouse.px=mouse.x; mouse.py=mouse.y;
