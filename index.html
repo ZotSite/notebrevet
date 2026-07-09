@@ -73,14 +73,26 @@
 <script>
 "use strict";
 const TW = 434, TH = 620;   // ratio de gratte.png (1049×1499)
-const DPR = Math.min(devicePixelRatio || 1, 2);
+// mobile : DPR plus bas (le fill rate du shader d'or coûte cher) et doigt = pinceau plus large
+const TOUCH = matchMedia('(pointer:coarse)').matches;
+const DPR = Math.min(devicePixelRatio || 1, TOUCH ? 1.5 : 2);
 const canvas = document.getElementById('gl');
 canvas.width = TW*DPR; canvas.height = TH*DPR;
-canvas.style.width = TW+'px'; canvas.style.height = TH+'px';
 const fl = document.getElementById('flakes');
 fl.width = TW*DPR; fl.height = TH*DPR;
-fl.style.width = TW+'px'; fl.style.height = TH+'px';
 const flx = fl.getContext('2d');
+
+// le ticket est mis à l'échelle pour tenir dans l'écran : sans ça, sur un
+// téléphone étroit une partie des cases sort du viewport et devient ingrattable
+let cssW=TW, cssH=TH;
+function layout(){
+  const s = Math.min(1, (innerWidth-24)/TW, (innerHeight-150)/TH);
+  cssW = Math.round(TW*s); cssH = Math.round(TH*s);
+  for(const c of [canvas, fl]){ c.style.width=cssW+'px'; c.style.height=cssH+'px'; }
+}
+layout();
+addEventListener('resize', layout);
+if(TOUCH) document.getElementById('wrap').style.filter='drop-shadow(0 18px 26px rgba(0,0,0,.5))';
 const coin = document.getElementById('coin');
 const wrap = document.getElementById('wrap');
 
@@ -398,7 +410,8 @@ function playResult(win){
 // ================= état =================
 const mouse={x:.5,y:.5,px:.5,py:.5,down:false,speed:0};
 // une case se révèle dès qu'elle est grattée à ZONE_THRESHOLD ; la bannière attend les 4
-const ZONE_THRESHOLD = 0.55;
+const ZONE_THRESHOLD = TOUCH ? 0.42 : 0.5;
+const MEASURE_EVERY  = TOUCH ? 20 : 12;
 const reveal      = new Float32Array(4);
 const revealTarget= new Float32Array(4);
 const zoneDone    = [false,false,false,false];
@@ -408,12 +421,17 @@ const tilt={x:0,y:0,tx:0,ty:0};
 const banner=document.getElementById('banner');
 const meterBar=document.querySelector('#meter i');
 const particles=[];
-const MAX_PARTICLES=700;
+const MAX_PARTICLES=TOUCH?260:700;
 let lastVibe=0;
 
+// on lit la boîte de layout (non transformée) : le rect du canvas est faussé
+// par le tilt 3D de #wrap, ce qui décalerait le grattage sous le doigt
+const stage=document.getElementById('stage');
 function toUV(e){
-  const r=canvas.getBoundingClientRect();
-  return [(e.clientX-r.left)/r.width, 1-(e.clientY-r.top)/r.height];
+  const s=stage.getBoundingClientRect();
+  const left=s.left+wrap.offsetLeft+canvas.offsetLeft;
+  const top =s.top +wrap.offsetTop +canvas.offsetTop;
+  return [(e.clientX-left)/cssW, 1-(e.clientY-top)/cssH];
 }
 const pileY = TH*DPR - 8*DPR;
 
@@ -429,7 +447,7 @@ canvas.addEventListener('pointermove',e=>{
     mouse.speed = Math.hypot(dx,dy);
     const inZ = inAnyZone(u,v);
     if(inZ){
-      for(let i=0;i<Math.min(mouse.speed*0.7,9);i++){
+      for(let i=0;i<Math.min(mouse.speed*0.7,TOUCH?4:9);i++){
         if(particles.length>MAX_PARTICLES) particles.shift();
         particles.push({
           x:u*TW*DPR + (Math.random()-.5)*20*DPR,
@@ -488,18 +506,23 @@ document.getElementById('replay').addEventListener('click',()=>{
 const zonesPx = ZONES.map(z=>({ x:Math.floor(z[0]*MW), y:Math.floor(z[1]*MH),
                                 w:Math.floor(z[2]*MW), h:Math.floor(z[3]*MH) }));
 const pixBuf=new Uint8Array(Math.max(...zonesPx.map(z=>z.w*z.h))*4);
-// pourcentage gratté de chaque case, indépendamment
-function scratchedPctPerZone(){
+const zonePct=[0,0,0,0];
+// readPixels est un stall GPU->CPU (très cher sur mobile) : on ne mesure
+// que les cases encore en cours, et on échantillonne une ligne sur deux
+function measureZones(){
   gl.bindFramebuffer(gl.FRAMEBUFFER,maskFBO);
-  const out=zonesPx.map(z=>{
+  for(let i=0;i<4;i++){
+    if(zoneDone[i]) continue;
+    const z=zonesPx[i];
     gl.readPixels(z.x,z.y,z.w,z.h,gl.RGBA,gl.UNSIGNED_BYTE,pixBuf);
-    const len=z.w*z.h*4;
-    let n=0;
-    for(let i=0;i<len;i+=4) if(pixBuf[i]>110) n++;
-    return n/(z.w*z.h);
-  });
+    let n=0, tot=0;
+    for(let y=0;y<z.h;y+=2){
+      const row=y*z.w*4;
+      for(let k=0;k<z.w;k++){ tot++; if(pixBuf[row+k*4]>110) n++; }
+    }
+    zonePct[i]=n/tot;
+  }
   gl.bindFramebuffer(gl.FRAMEBUFFER,null);
-  return out;
 }
 
 function drawParticles(dt){
@@ -533,7 +556,7 @@ function drawParticles(dt){
   flx.globalAlpha=1;
 }
 function burstConfetti(){
-  for(let i=0;i<160;i++){
+  for(let i=0;i<(TOUCH?90:160);i++){
     if(particles.length>MAX_PARTICLES) particles.shift();
     particles.push({
       x:fl.width/2, y:fl.height*0.4,
@@ -592,7 +615,8 @@ function frame(now){
   tilt.x += (tilt.tx - tilt.x)*dt*8;
   tilt.y += (tilt.ty - tilt.y)*dt*8;
   wrap.style.transform='rotateX('+tilt.x+'deg) rotateY('+tilt.y+'deg)';
-  wrap.style.filter='drop-shadow('+(-tilt.y*2.5)+'px '+(24+tilt.x*2.5)+'px 40px rgba(0,0,0,.55))';
+  // le drop-shadow (flou 40px) repeint tout le ticket : animé sur desktop, figé au doigt
+  if(!TOUCH) wrap.style.filter='drop-shadow('+(-tilt.y*2.5)+'px '+(24+tilt.x*2.5)+'px 40px rgba(0,0,0,.55))';
 
   if(mouse.down && !done){
     gl.bindFramebuffer(gl.FRAMEBUFFER,maskFBO);
@@ -600,7 +624,7 @@ function frame(now){
     gl.useProgram(progBrush); bindQuad(progBrush);
     gl.uniform2f(U(progBrush,'uMouse'),mouse.x,mouse.y);
     gl.uniform2f(U(progBrush,'uPrev'),mouse.px,mouse.py);
-    gl.uniform1f(U(progBrush,'uRadius'),0.07);
+    gl.uniform1f(U(progBrush,'uRadius'),TOUCH?0.105:0.07);
     gl.uniform1f(U(progBrush,'uAspect'),TW/TH);
     gl.uniform1f(U(progBrush,'uSeed'),seed);
     gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE);
@@ -609,13 +633,12 @@ function frame(now){
     gl.bindFramebuffer(gl.FRAMEBUFFER,null);
 
     setScratchVolume(mouse.speed);
-    if(frameCount%12===0){
-      const pcts=scratchedPctPerZone();
+    if(frameCount%MEASURE_EVERY===0){
+      measureZones();
       let progress=0;
       for(let i=0;i<4;i++){
-        const p=Math.min(pcts[i]/ZONE_THRESHOLD,1);
-        progress += (zoneDone[i]?1:p)/4;
-        if(!zoneDone[i] && pcts[i]>ZONE_THRESHOLD) revealZone(i);
+        progress += (zoneDone[i] ? 1 : Math.min(zonePct[i]/ZONE_THRESHOLD,1))/4;
+        if(!zoneDone[i] && zonePct[i]>ZONE_THRESHOLD) revealZone(i);
       }
       meterBar.style.width=progress*100+'%';
     }

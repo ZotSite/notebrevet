@@ -37,4 +37,15 @@ Autour de ça :
 - **Audio** : Web Audio procédural (bruit blanc filtré pour le grattage, arpège d'oscillateurs pour le résultat). Initialisé au premier `pointerdown` (contrainte autoplay).
 - **Interactions** : la pièce (`#coin`) est un div qui suit le pointeur ; tilt 3D du ticket via CSS transform sur `#wrap` ; la lumière du shader suit la souris ou le gyroscope (`deviceorientation`) ; vibration haptique sur mobile.
 
-Constantes clés en tête de script : `TW/TH` (taille ticket 434×620, même ratio que gratte.png), `DPR` (capé à 2), `ZONES`, `MW/MH` (résolution du masque).
+Constantes clés en tête de script : `TW/TH` (taille ticket 434×620, même ratio que gratte.png), `DPR`, `ZONES`, `MW/MH` (résolution du masque).
+
+## Contraintes mobile
+
+Le drapeau `TOUCH` (`pointer:coarse`) pilote plusieurs compromis, tous là pour une raison — ne pas les retirer sans mesurer sur un vrai téléphone :
+
+- **`DPR` capé à 1.5** et **`MAX_PARTICLES` réduit** : le shader d'or est fill-rate bound, et les copeaux sont redessinés en canvas 2D à chaque frame.
+- **`MEASURE_EVERY` à 20 frames**, et `measureZones()` ignore les cases déjà révélées + n'échantillonne qu'une ligne sur deux : `readPixels` est un stall GPU→CPU, brutal sur les GPU tuilés.
+- **`drop-shadow` figé** : animé, il repeint tout le ticket (flou 40px) à chaque frame.
+- **`uRadius` plus grand** et `ZONE_THRESHOLD` plus bas : un doigt couvre plus qu'une souris mais bouge moins précisément.
+
+`layout()` met le ticket à l'échelle du viewport (le backing store reste `TW*DPR`). `toUV()` doit lire la boîte de **layout** (`stage` rect + `offsetLeft/Top`) et non `canvas.getBoundingClientRect()`, faussé par le tilt 3D de `#wrap` : sinon le grattage se décale sous le doigt.
